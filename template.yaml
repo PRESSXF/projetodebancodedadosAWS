@@ -1,0 +1,76 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Transform: AWS::Serverless-2016-10-31
+Description: Projeto de Encurtador de URL Serverless (AWS SAM)
+
+Globals:
+  Function:
+    Runtime: nodejs20.x # Versão Node.js escolhida
+    Timeout: 10
+    MemorySize: 128
+    Environment:
+      Variables:
+        # Variável de ambiente comum a ambas as funções
+        URL_TABLE_NAME: !Ref UrlShortenerTable 
+
+Resources:
+  # -----------------------------------------------------
+  # 1. SERVIÇO DE ARMAZENAMENTO (OBRIGATÓRIO 1: DynamoDB)
+  # -----------------------------------------------------
+  UrlShortenerTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: UrlShortenerTableProject
+      AttributeDefinitions:
+        - AttributeName: short_code
+          AttributeType: S
+      KeySchema:
+        - AttributeName: short_code
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST # Modo Serverless de cobrança (melhor prática)
+      
+  # -----------------------------------------------------
+  # 2. SERVIÇO DE PROCESSAMENTO (OBRIGATÓRIO 2: Lambda)
+  # -----------------------------------------------------
+  
+  # A. Função para CRIAR o link curto (POST /shorten)
+  CreateShortUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      CodeUri: src/create/ # Local do código
+      Policies:
+        # Permite à função escrever e ler no DynamoDB (PutItem, GetItem, etc.)
+        - DynamoDBCrudPolicy:
+            TableName: !Ref UrlShortenerTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties: # <<<<< CORRIGIDO: Era 'Outputs', agora é 'Properties'
+            Path: /shorten
+            Method: POST
+
+  # B. Função para REDIRECIONAR o link curto (GET /{short_code})
+  RedirectToUrlFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.handler
+      CodeUri: src/redirect/ # Local do código
+      Policies:
+        # Permite à função APENAS ler no DynamoDB (melhor prática de segurança)
+        - DynamoDBReadPolicy:
+            TableName: !Ref UrlShortenerTable
+      Events:
+        ApiEvent:
+          Type: Api
+          Properties: # <<<<< CORRIGIDO: Era 'Outputs', agora é 'Properties'
+            Path: /{short_code}
+            Method: GET
+
+# -----------------------------------------------------
+# 3. SAÍDAS (OUTPUTS) - Para exibir o URL no terminal após o deploy
+# -----------------------------------------------------
+Outputs:
+  UrlShortenerApi:
+    Description: "API Gateway endpoint URL para o serviço de encurtamento."
+    # O !Sub constrói a URL final a partir do ID do API Gateway criado pelo SAM.
+    Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"

@@ -1,76 +1,174 @@
 AWSTemplateFormatVersion: '2010-09-09'
 Transform: AWS::Serverless-2016-10-31
-Description: Projeto de Encurtador de URL Serverless (AWS SAM)
+Description: Projeto de Encurtador de URL Serverless e Frontend Estático com CDN.
 
+# =======================================================
+# CONFIGURAÇÕES GLOBAIS
+# =======================================================
 Globals:
   Function:
-    Runtime: nodejs20.x # Versão Node.js escolhida
+    Runtime: nodejs20.x 
     Timeout: 10
     MemorySize: 128
     Environment:
       Variables:
-        # Variável de ambiente comum a ambas as funções
-        URL_TABLE_NAME: !Ref UrlShortenerTable 
+        # Variável de ambiente atualizada para usar a referência dinâmica
+        URL_TABLE_NAME: !Ref TabelaEncurtadorURLs 
 
+# =======================================================
+# RECURSOS (BACKEND E FRONTEND)
+# =======================================================
 Resources:
+  
   # -----------------------------------------------------
-  # 1. SERVIÇO DE ARMAZENAMENTO (OBRIGATÓRIO 1: DynamoDB)
+  # 1. ARMAZENAMENTO CORE (DYNAMODB)
   # -----------------------------------------------------
-  UrlShortenerTable:
+  TabelaEncurtadorURLs:
     Type: AWS::DynamoDB::Table
     Properties:
-      TableName: UrlShortenerTableProject
+      # Nome físico dinâmico para evitar conflitos!
+      TableName: !Sub "TabelaEncurtadorURLs-${AWS::StackName}" 
       AttributeDefinitions:
-        - AttributeName: short_code
+        - AttributeName: codigo_curto
           AttributeType: S
       KeySchema:
-        - AttributeName: short_code
+        - AttributeName: codigo_curto
           KeyType: HASH
-      BillingMode: PAY_PER_REQUEST # Modo Serverless de cobrança (melhor prática)
+      BillingMode: PAY_PER_REQUEST
       
   # -----------------------------------------------------
-  # 2. SERVIÇO DE PROCESSAMENTO (OBRIGATÓRIO 2: Lambda)
+  # 2. FUNÇÕES LAMBDA
   # -----------------------------------------------------
-  
-  # A. Função para CRIAR o link curto (POST /shorten)
-  CreateShortUrlFunction:
+  FuncaoCriarURLCurta:
     Type: AWS::Serverless::Function
     Properties:
       Handler: index.handler
-      CodeUri: src/create/ # Local do código
+      CodeUri: src/create/
       Policies:
-        # Permite à função escrever e ler no DynamoDB (PutItem, GetItem, etc.)
         - DynamoDBCrudPolicy:
-            TableName: !Ref UrlShortenerTable
+            TableName: !Ref TabelaEncurtadorURLs
       Events:
         ApiEvent:
           Type: Api
-          Properties: # <<<<< CORRIGIDO: Era 'Outputs', agora é 'Properties'
-            Path: /shorten
+          Properties:
+            Path: /encurtar
             Method: POST
 
-  # B. Função para REDIRECIONAR o link curto (GET /{short_code})
-  RedirectToUrlFunction:
+  FuncaoRedirecionarURL:
     Type: AWS::Serverless::Function
     Properties:
       Handler: index.handler
-      CodeUri: src/redirect/ # Local do código
+      CodeUri: src/redirect/
       Policies:
-        # Permite à função APENAS ler no DynamoDB (melhor prática de segurança)
         - DynamoDBReadPolicy:
-            TableName: !Ref UrlShortenerTable
+            TableName: !Ref TabelaEncurtadorURLs
       Events:
         ApiEvent:
           Type: Api
-          Properties: # <<<<< CORRIGIDO: Era 'Outputs', agora é 'Properties'
-            Path: /{short_code}
+          Properties:
+            Path: /{codigo_curto}
             Method: GET
 
-# -----------------------------------------------------
-# 3. SAÍDAS (OUTPUTS) - Para exibir o URL no terminal após o deploy
-# -----------------------------------------------------
+  # -----------------------------------------------------
+  # 3. INFRAESTRUTURA DO FRONTEND ESTÁTICO (S3 e CLOUDFRONT)
+  # -----------------------------------------------------
+  
+  BucketFrontend: # Nome do recurso mudado
+    Type: AWS::S3::Bucket
+    Properties:
+      # Nome do bucket usando StackName e AccountId para garantir unicidade global
+      BucketName: !Sub "frontend-encurtador-${AWS::StackName}-${AWS::AccountId}" 
+      WebsiteConfiguration:
+        IndexDocument: index.html
+        ErrorDocument: index.html 
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: false
+        BlockPublicPolicy: false
+        IgnorePublicAcls: false
+        RestrictPublicBuckets: false
+
+  PoliticaBucketFrontend: # Nome do recurso mudado
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref BucketFrontend
+      PolicyDocument:
+        Statement:
+          - Effect: Allow
+            Principal: "*"
+            Action: s3:GetObject
+            Resource: !Sub "arn:aws:s3:::${BucketFrontend}/*"
+
+  DistribuicaoCDN: # Nome do recurso mudado
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        Enabled: true
+        Comment: CDN para o Frontend do Encurtador de URL
+        DefaultCacheBehavior:
+          TargetOriginId: S3Origin
+          ViewerProtocolPolicy: redirect-to-https 
+          AllowedMethods: [ "GET", "HEAD" ]
+          CachedMethods: [ "GET", "HEAD" ]
+          ForwardedValues:
+            QueryString: false
+        Origins:
+          - DomainName: !GetAtt BucketFrontend.DomainName
+            Id: S3Origin
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+        ViewerCertificate:
+          CloudFrontDefaultCertificate: true
+
+  # -----------------------------------------------------
+  # 4. CUSTOM RESOURCE (UPLOAD DO FRONTEND)
+  # -----------------------------------------------------
+
+  UploadFrontendCustomResource: # Nome do recurso mudado
+    Type: Custom::S3Uploader
+    Properties:
+      ServiceToken: !GetAtt FuncaoAuxiliarS3.Arn
+      BucketName: !Ref BucketFrontend
+      SourceFolder: frontend
+      FilesToUpload:
+        - file: index.html
+        - file: script.js
+      Replacements:
+        - file: script.js
+          placeholder: "[API_ENDPOINT_PLACEHOLDER]"
+          # O ServerlessRestApi (API Gateway) é um recurso criado automaticamente pelo SAM
+          value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod"
+
+  FuncaoAuxiliarS3: # Nome do recurso mudado
+    Type: AWS::Serverless::Function
+    Properties:
+      # CORREÇÃO 1: Mudar para o diretório raiz para incluir a pasta 'frontend' no pacote.
+      CodeUri: .
+      # CORREÇÃO 2: Atualizar o Handler para refletir o novo CodeUri.
+      Handler: s3_upload_helper.index.handler
+      Runtime: python3.12
+      MemorySize: 128
+      Timeout: 60
+      Policies:
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:DeleteObject
+              - s3:ListBucket
+            Resource: !Sub "arn:aws:s3:::${BucketFrontend}*"
+        - Statement:
+            Effect: Allow
+            Action:
+              - s3:ListBucket
+            Resource: !GetAtt BucketFrontend.Arn
+
+# =======================================================
+# SAÍDAS (OUTPUTS) - Para fácil acesso ao link final
+# =======================================================
 Outputs:
-  UrlShortenerApi:
-    Description: "API Gateway endpoint URL para o serviço de encurtamento."
-    # O !Sub constrói a URL final a partir do ID do API Gateway criado pelo SAM.
+  FrontendUrl:
+    Description: "URL do Frontend (Acessar este link para a demonstração)"
+    Value: !GetAtt DistribuicaoCDN.DomainName
+  BackendApiUrl:
+    Description: "URL do Backend (API Gateway)"
     Value: !Sub "https://${ServerlessRestApi}.execute-api.${AWS::Region}.amazonaws.com/Prod/"
